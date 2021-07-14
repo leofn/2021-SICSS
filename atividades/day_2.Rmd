@@ -1,0 +1,295 @@
+---
+title: "Coletando dados digitais"
+author: 
+  - "Beatriz Milz"
+  - "Juliana Brandão"
+  - "Luana Calzavara"
+  - "Nico Linares"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+Fonte dos dados: Wikipedia
+
+Parte 1: mudanças na página de wikipedia
+Pergunta: tentar descobrir se existe um padrão nas alteracoes do verbete no wikipedia que reflita um contexto maior no país .
+
+- https://pt.wikipedia.org/w/index.php?title=Discuss%C3%A3o:Jair_Bolsonaro&action=history
+
+Parte 2: Discussão nas alteração
+
+Objetivo: verificar temas discutidos, fazer uma análise de texto, topic model.
+
+Pergunta: tentar descobrir se existe um padrão nas discussões que reflita um contexto maior no país .
+
+- https://pt.wikipedia.org/wiki/Discuss%C3%A3o:Jair_Bolsonaro
+
+- Inicialmente: Bolsonaro
+
+
+## Parte 1
+
+Tentativa 1:
+- Encontramos um pacote chamado WikipediR, porém a documentação não apresenta exemplos e não é atualizado há 4 anos.
+
+Tentativa 2: API 
+
+https://pt.wikipedia.org/w/api.php
+
+
+
+Tentativa 3: WS
+
+
+## Coleta de dados
+
+```{r eval=FALSE, include=TRUE}
+library(magrittr, include.only = "%>%")
+
+buscar_termos <- function(termo, limite = "10000") {
+  
+  termo_pesquisa <- termo %>% stringr::str_replace_all(" ", "_")
+
+  url_wikipedia <-
+    glue::glue(
+      "https://pt.wikipedia.org/w/index.php?title={termo_pesquisa}&offset=&limit={limite}&action=history"
+    )
+  url_encoded <- utils::URLencode(url_wikipedia)
+  
+  html <- rvest::read_html(url_encoded)
+
+  itens <-
+    rvest::html_node(html, xpath = '//*[@id="pagehistory"]') %>%
+    rvest::html_nodes("li")
+  
+
+  buscar_classe <- function(lista, classe) {
+    lista %>%
+      purrr::map(~ rvest::html_nodes(.x, glue::glue("[class='{classe}']"))) %>%
+      purrr::map(function(.x) {
+        aux <- rvest::html_text(.x)
+        if (length(aux) == 0) {
+          return(NA_character_)
+        } else {
+          return(aux)
+        }
+      }) %>%
+      purrr::as_vector()  # é aqui que ta dando problema
+  }
+  
+  buscar_id <- function(lista) {
+    lista %>% rvest::html_attr("data-mw-revid")
+  }
+  
+  id <- buscar_id(itens)
+  
+  
+  contribuidor <-
+    itens %>%
+    rvest::html_nodes("bdi") %>%
+    rvest::html_text()
+  
+  data <- buscar_classe(itens, "mw-changeslist-date")
+  #secao_alterada <- buscar_classe(itens, "autocomment")
+  comentario <-
+    buscar_classe(itens, "comment comment--without-parentheses")
+  caracteres_removidos <-
+    buscar_classe(itens, "mw-plusminus-neg mw-diff-bytes")
+  caracteres_adicionados <-
+    buscar_classe(itens, "mw-plusminus-pos mw-diff-bytes")
+  tamanho_mudanca_bytes <-
+    buscar_classe(itens, "history-size mw-diff-bytes")
+  minor_edit <- buscar_classe(itens, "minoredit")
+  
+  
+  tag <- itens %>% 
+  purrr::map(~ rvest::html_nodes(.x, "[class='mw-tag-markers']") ) %>% 
+  purrr::map( ~  rvest::html_elements(.x, "span")) %>% 
+   purrr::map(function(.x) {
+        aux <- rvest::html_text(.x)
+        if (length(aux) == 0) {
+          return(NA_character_)
+        } else {
+          return(aux)
+        }
+      }) %>% 
+  purrr::map(~ knitr::combine_words(.x, sep = "; ", and = "; ")) %>% 
+  purrr::as_vector()
+  
+
+  tabela_suja <- tibble::tibble(
+    id,
+    contribuidor,
+    data,
+    # secao_alterada,
+    comentario,
+    caracteres_removidos,
+    caracteres_adicionados,
+    minor_edit,
+    tag
+  )
+  
+  tabela_suja
+}
+
+
+tabela_suja <- buscar_termos("Jair Bolsonaro")
+dplyr::glimpse(tabela_suja)
+
+readr::write_rds(tabela_suja,
+                 "dados/jair_bolsonaro_15-06-2021-dados_brutos.Rds")
+
+```
+
+## Limpeza de dados
+
+```{r eval=FALSE, include=TRUE}
+library(magrittr, include.only = "%>%")
+tabela_suja <- readr::read_rds("dados/jair_bolsonaro_15-06-2021-dados_brutos.Rds")
+dplyr::glimpse(tabela_suja)
+```
+
+
+```{r eval=FALSE, include=TRUE}
+
+df_dados <- tabela_suja %>%
+  tidyr::separate(
+    data,
+    sep = " de ",
+    into = c("horario",  "data"),
+    extra = "merge"
+  ) %>%
+  dplyr::mutate(
+    data = readr::parse_date(data, format = "%d de %B de %Y", locale = readr::locale("pt")),
+    caracteres_removidos = stringr::str_remove(caracteres_removidos, "−"),
+    caracteres_adicionados = stringr::str_remove(caracteres_adicionados, "\\+"),
+    caracteres_removidos  = stringr::str_remove_all(caracteres_removidos, "\\D"),
+    caracteres_adicionados = stringr::str_remove_all(caracteres_adicionados, "\\D"),
+    caracteres_removidos = readr::parse_double(caracteres_removidos),
+    caracteres_adicionados = readr::parse_double(caracteres_adicionados),
+    caracteres_removidos = tidyr::replace_na(caracteres_removidos, 0),
+    caracteres_adicionados = tidyr::replace_na(caracteres_adicionados, 0),
+    minor_edit = dplyr::case_when(minor_edit == "m" ~ TRUE,
+                                  TRUE ~ NA),
+    tag = dplyr::case_when(tag == "NA" ~ NA_character_,
+                           TRUE ~ tag)
+  ) %>%
+  dplyr::mutate(
+    comentario_original = comentario,
+    secao = stringr::str_extract(comentario, pattern = "→.*:"),
+    secao = stringr::str_remove(secao, pattern = ":.*$"),
+    comentario = stringr::str_remove(comentario, pattern = "→.*:"),
+    secao = dplyr::case_when(stringr::str_detect(comentario, "^→") ~ comentario,
+                             TRUE ~ secao),
+    secao = stringr::str_remove_all(secao, pattern = ":|→"),
+    secao = stringr::str_trim(secao),
+    comentario = stringr::str_remove(comentario, "^→.*"),
+    comentario = stringr::str_trim(comentario),
+    comentario = dplyr::case_when(comentario == "" ~ NA_character_, TRUE ~ comentario)
+  ) %>%
+  dplyr::relocate(comentario_original, secao, comentario, .before = caracteres_removidos)
+
+readr::write_rds(df_dados,
+                 "dados/jair_bolsonaro_15-06-2021-dados_tidy.Rds")
+```
+
+```{r}
+library(magrittr, include.only = "%>%")
+df_dados <- readr::read_rds("dados/jair_bolsonaro_15-06-2021-dados_tidy.Rds")
+dplyr::glimpse(df_dados)
+```
+
+- Pensando em número de contribuicoes:
+
+```{r}
+lista_contribuidores_numero <- df_dados %>% 
+  dplyr::count(contribuidor, sort = TRUE) 
+
+
+lista_contribuidores_numero %>% 
+  dplyr::slice(1:10) %>% 
+  knitr::kable()
+```
+
+- Pensando em número de caracteres alterados:
+
+```{r}
+lista_contribuidores_caracteres <- df_dados %>% 
+  dplyr::mutate(qnt_mudancas = caracteres_adicionados + caracteres_removidos) %>% 
+  dplyr::group_by(contribuidor) %>% 
+  dplyr::summarise(acumulado_mudancas = sum(qnt_mudancas)) %>% 
+  dplyr::arrange(desc(acumulado_mudancas)) 
+
+lista_contribuidores_caracteres %>% 
+  dplyr::slice(1:10) %>%
+  knitr::kable()
+```
+
+- De quem sao os IPs que aparecem??
+
+- As pessoas sao as que mais fazem contribuicoes sao as mesmas que fizeram o maior numero de modificacoes?
+
+Não... tem umas pessoas que fizeram mudancas poucas vezes mas alterara muitas coisas.
+
+```{r}
+lista_contribuidores <- dplyr::full_join(lista_contribuidores_caracteres, lista_contribuidores_numero)
+
+lista_contribuidores %>% head(10) %>% knitr::kable()
+```
+
+
+## Métodos híbridos
+
+- Ideia de rede: quem contribui na pagina do bolsonaro, contribui em quais paginas?
+https://xtools.wmflabs.org/topedits/pt.wikipedia.org/Bageense/0
+
+Curiosidade enviada por outra pessoa: Bageense é quem nasceu em Bagé -RS. É uma cidade com um eleitorado extremamente conservador. Talvez seja útil
+
+```{r}
+
+
+
+buscar_lista_contrib <- function(id_contribuidor) {
+  url <-
+    glue::glue("https://xtools.wmflabs.org/topedits/pt.wikipedia.org/{id_contribuidor}/0")
+  url_encoded <- utils::URLencode(url)
+  
+  html <- rvest::read_html(url_encoded)
+  
+  html %>%
+    rvest::html_node(xpath = '//*[@class="table table-bordered table-hover table-striped topedits-namespace-table xt-show-hide--target"]') %>%
+    rvest::html_table()
+}
+
+# REMOVER IPs para buscar!
+# lista_contribuidores$contribuidor %>% 
+#   stringr::str_detect(pattern = "")
+# 
+# buscar_lista_contrib(lista_contribuidores$contribuidor[1])
+```
+
+
+- IPs: qual é a origem??  https://en.wikipedia.org/wiki/Wikipedia:IP_users a partir de onde essas informacoes estão sendo feitas??
+
+- O que ta sendo alterado? olhar o que foi removido
+
+- Como o link circula nas redes sociais? tem pico nos acessos? esse pico tem relacao com os compartilhamentos?? croundtangle
+
+
+- Netwar -- psyops. quem coloca o conteudo, e o que? batalha discursiva. debate para decidir "a verdade". quais redes as pessoas editoras e revisoras participam?
+
+
+https://mittechreview.com.br/as-licoes-da-wikipedia-e-suas-limitacoes/
+
+
+Outra ideia: Percepcao das pessoas usuárias, Experimento de vinheta: o quanto a pagina do wikipedia pode influenciar na percepcao das pessoas como ela ve o bolsonaro, o wikipedia, a colaboracao massiva?
+
+
+Agradecemos: 
+  - Ideias: Tiago e turma do SICSS
+  - Ajuda com código: Jean Prado, Julio Trecenti, Fernando Correa, Athos Damiani
+
+
